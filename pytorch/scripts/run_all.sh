@@ -21,17 +21,33 @@ mkdir -p "${OUT_DIR}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+if [[ -z "${PYTHON:-}" ]]; then
+    if [[ -x ".venv/bin/python" ]]; then
+        PYTHON=".venv/bin/python"
+    else
+        PYTHON="python"
+    fi
+fi
+export PYTHON
+
+# Apptainer + NGC PyTorch on aarch64: Triton (used by torch.compile) needs
+# libcuda.so.1 visible at JIT time. The `--nv` flag bind-mounts the real
+# driver, but Triton's probe misses the compat path. Prepend it if present.
+if [[ -e /usr/local/cuda/compat/lib/libcuda.so.1 ]]; then
+    export LD_LIBRARY_PATH="/usr/local/cuda/compat/lib:${LD_LIBRARY_PATH:-}"
+fi
+
 for scn in "${SCENARIOS[@]}"; do
     echo
     echo "======================================================================"
     echo "  scenario: ${scn}  (profiler=${PROFILER})"
     echo "======================================================================"
     if [[ "${PROFILER}" == "nsys" ]]; then
-        OUT_DIR="${OUT_DIR}" \
+        OUT_DIR="${OUT_DIR}" PYTHON="${PYTHON}" \
             bash "${SCRIPT_DIR}/run_nsys.sh" "${scn}" \
                 --warmup "${WARMUP}" --steps "${STEPS}"
     else
-        python -m profiling_demo \
+        "${PYTHON}" -m profiling_demo \
             --scenario "${scn}" \
             --profiler "${PROFILER}" \
             --out-dir "${OUT_DIR}" \
@@ -44,7 +60,7 @@ echo
 echo "======================================================================"
 echo "  summary"
 echo "======================================================================"
-python - <<'PY'
+"${PYTHON}" - <<'PY'
 import json, os
 from pathlib import Path
 
