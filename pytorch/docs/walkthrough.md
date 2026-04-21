@@ -105,35 +105,62 @@ nsys stats --report cuda_gpu_mem_size_sum out/amp.nsys-rep
 
 ---
 
-## 4. `compiled` — torch.compile, bs=8
+## 4. `starved` — slow dataloader, bs=8
 
-**What you're looking at:** dramatically fewer, longer kernels. On the API
-row, the forest of `cudaLaunchKernel` calls is replaced (or mostly replaced)
-by a single `cudaGraphLaunch` per step.
+**What you're looking at:** the single most common real-world profiling
+shape — a GPU that's idle more than it's busy because the host can't feed
+it fast enough. This is what "my training is slow" actually looks like
+nine times out of ten.
 
 **Look for:**
 
-- Kernel names containing `triton_` — these are fused kernels that
-  torch.compile's Inductor backend generated. One Triton kernel often
-  replaces 5–10 eager ones (e.g. LayerNorm + residual + next op's pre-GEMM
-  reshape all fuse).
-- Under NVTX `iter/N`, the total wall time per step drops; more of it is
-  now "useful" GEMM time.
-- On the **CUDA API** row you should see `cudaGraphLaunch` calls in place
-  of streams of `cudaLaunchKernel`. That's `mode="reduce-overhead"` doing
-  its job — Inductor captured each forward/backward into a CUDA graph.
-- First few profiled steps may still be re-compiling / re-capturing if
-  shapes shifted — that's why `--warmup` defaults to ≥3 for this scenario.
+- On the **Kernels** row, obvious gaps between the dense kernel bursts of
+  successive `iter/N` ranges. The GPU has nothing to do during those gaps.
+- On the **NVTX** row inside each `iter/N`, a labelled `data` range holds
+  three sub-ranges: `dataloader_sleep`, `host_collate`, `h2d_copy`.
+  `dataloader_sleep` is pure CPU time (20ms in this scenario) — no kernels
+  at all. That's the teaching moment: GPU idle = money burned.
+- On the **CUDA API** row during `h2d_copy`, a `cudaMemcpyAsync`
+  (host→device). Small and quick; the sleep dwarfs it. That's the twist:
+  the copy isn't the bottleneck, *the Python-side work that produced the
+  batch is.*
+- Median step time roughly equals `sleep_s + baseline_step_s` — the GPU
+  work and host work run serially, not overlapped.
 
-**Teaching moment:** compare total kernel count from the torch.profiler
-summary. Compiled typically shows a 3–10x reduction in total kernel launches
-per step for this model. That reduction is what closes the Python overhead
-gap and is what makes small-batch inference / training viable on Hopper.
+**Teaching moment:** there are two common fixes and the trace points at
+both.
+
+1. **Parallelize host work**: use multiple `DataLoader` workers so the next
+   batch is ready by the time the current step finishes. A real
+   `DataLoader(num_workers=4, pin_memory=True, prefetch_factor=2)` hides
+   the gap entirely. You'd see the gaps disappear in the timeline without
+   changing the per-step compute.
+2. **Overlap with CUDA streams**: issue the H2D copy on a side stream and
+   have the next step start as soon as the copy finishes, in parallel with
+   the optimizer of the previous step. More complex; usually unnecessary
+   if (1) is done well.
+
+To compare on-device vs starved quantitatively:
 
 ```
-jq .torch_profiler.total_cuda_kernels out/baseline.report.json \
-                                      out/compiled.report.json
+jq '{scenario, median_step_ms, wall_seconds}' \
+    out/baseline.report.json out/starved.report.json
 ```
+
+You should see `starved` ≈ `baseline + 20ms` per step. If it's more, the
+dataloader pipeline has other sins (e.g. the pinned-memory allocation
+itself is slow).
+
+> **Try this**: re-run the scenario with different sleep values and watch
+> the timeline shape change.
+>
+>     ./scripts/run_nsys.sh starved --slow-host-sleep-s 0.005   # GPU-bound
+>     ./scripts/run_nsys.sh starved --slow-host-sleep-s 0.050   # CPU-bound
+>
+> The 5ms run should look almost identical to baseline — the GPU consumes
+> batches as fast as they're produced. The 50ms run shows huge gaps with
+> tiny compute bursts. The crossover point is approximately the baseline
+> step time; above it you're CPU-bound, below it you're GPU-bound.
 
 ---
 

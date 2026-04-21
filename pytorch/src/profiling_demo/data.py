@@ -1,11 +1,13 @@
 """Synthetic data generators.
 
-Default path: pre-generate a batch of random token ids on device so scenarios
-isolate the GPU story (no DataLoader, no H2D copies per step).
+Two paths:
 
-``--slow-host-data`` hook: generate on CPU and copy per step, optionally with a
-``sleep`` to simulate a slow collate. Left wired through the CLI but not used
-by any baked-in scenario; provided for future "starved GPU" demos.
+- Device batches (default): random tokens generated directly on the GPU. No
+  DataLoader, no H2D copies. Keeps most scenarios focused on the GPU story.
+- Host batches (``slow_host_data=True``): generated on CPU, pinned, copied
+  to device. Optionally sleeps first to simulate a slow collate / dataloader
+  worker. Used by the ``starved`` scenario to produce the classic
+  "GPU idle between steps" timeline.
 """
 
 from __future__ import annotations
@@ -61,27 +63,33 @@ def host_batch_iterator(
 ) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
     """Host-side batches copied to device each step.
 
-    Optionally sleeps before the copy to simulate a slow collate. Useful for
-    demonstrating a starved GPU; not used by any default scenario.
+    Optionally sleeps before the copy to simulate a slow collate. The sleep
+    and the copy are both wrapped in NVTX ranges so they're visible on the
+    nsys timeline as ``dataloader_sleep`` and ``h2d_copy``.
     """
+    from .profile_utils import nvtx_range  # local import avoids cycle at import time
+
     gen = torch.Generator(device="cpu").manual_seed(seed)
     pinned = torch.cuda.is_available()
     while True:
         if cfg.slow_host_sleep_s > 0:
-            time.sleep(cfg.slow_host_sleep_s)
-        x = torch.randint(
-            0, cfg.vocab_size, (cfg.batch_size, cfg.seq_len), generator=gen
-        )
-        y = torch.randint(
-            0, cfg.vocab_size, (cfg.batch_size, cfg.seq_len), generator=gen
-        )
-        if pinned:
-            x = x.pin_memory()
-            y = y.pin_memory()
-        yield (
-            x.to(device, non_blocking=True),
-            y.to(device, non_blocking=True),
-        )
+            with nvtx_range("dataloader_sleep"):
+                time.sleep(cfg.slow_host_sleep_s)
+        with nvtx_range("host_collate"):
+            x = torch.randint(
+                0, cfg.vocab_size, (cfg.batch_size, cfg.seq_len), generator=gen
+            )
+            y = torch.randint(
+                0, cfg.vocab_size, (cfg.batch_size, cfg.seq_len), generator=gen
+            )
+            if pinned:
+                x = x.pin_memory()
+                y = y.pin_memory()
+        with nvtx_range("h2d_copy"):
+            yield (
+                x.to(device, non_blocking=True),
+                y.to(device, non_blocking=True),
+            )
 
 
 def make_iterator(

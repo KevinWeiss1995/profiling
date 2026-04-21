@@ -73,6 +73,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--d-model", type=int, default=None)
     p.add_argument("--n-layers", type=int, default=None)
     p.add_argument("--slow-host-data", action="store_true", default=None)
+    p.add_argument(
+        "--slow-host-sleep-s",
+        type=float,
+        default=None,
+        help="Seconds to sleep per batch when slow-host-data is active "
+        "(simulates slow collate). Only meaningful with --slow-host-data "
+        "or the 'starved' scenario.",
+    )
 
     # Precision knobs (mostly for experimentation; the baseline uses TF32)
     p.add_argument(
@@ -110,6 +118,7 @@ def main(argv: list[str] | None = None) -> int:
         d_model=args.d_model,
         n_layers=args.n_layers,
         slow_host_data=args.slow_host_data,
+        slow_host_sleep_s=args.slow_host_sleep_s,
     )
 
     print(f"== profiling-demo {__version__} ==")
@@ -169,13 +178,17 @@ def main(argv: list[str] | None = None) -> int:
 
     def _profiled_loop() -> None:
         for step_idx in range(args.steps):
-            x, y = next(data_iter)
             # Per-step timing via CUDA events so we don't force a global sync.
             start = torch.cuda.Event(enable_timing=True) if torch.cuda.is_available() else None
             end = torch.cuda.Event(enable_timing=True) if torch.cuda.is_available() else None
             if start is not None:
                 start.record()
             with nvtx_range(f"iter/{step_idx}"):
+                # Data load inside the iter range so slow-host sleeps show
+                # up as labelled gaps on the NVTX row. With device batches
+                # this is near-free; with host batches it's the whole point.
+                with nvtx_range("data"):
+                    x, y = next(data_iter)
                 train_step(model, x, y, optimizer, autocast_ctx, step_idx=step_idx)
             if end is not None:
                 end.record()

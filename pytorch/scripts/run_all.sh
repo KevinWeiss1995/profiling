@@ -13,7 +13,7 @@ set -euo pipefail
 
 OUT_DIR="${OUT_DIR:-out}"
 PROFILER="${PROFILER:-torch}"
-SCENARIOS=(baseline large-batch amp compiled)
+SCENARIOS=(baseline large-batch amp starved)
 STEPS="${STEPS:-10}"
 WARMUP="${WARMUP:-5}"
 
@@ -66,7 +66,7 @@ from pathlib import Path
 
 out_dir = Path(os.environ.get("OUT_DIR", "out"))
 rows = []
-for scn in ["baseline", "large-batch", "amp", "compiled"]:
+for scn in ["baseline", "large-batch", "amp", "starved"]:
     p = out_dir / f"{scn}.report.json"
     if not p.exists():
         continue

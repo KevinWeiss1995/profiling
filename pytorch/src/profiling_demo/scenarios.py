@@ -8,7 +8,8 @@ Teaching goal per scenario:
 - ``baseline``    - dense stream of short kernels, visible launch gaps.
 - ``large-batch`` - same kernels, each longer; launch overhead amortized.
 - ``amp``         - GEMMs switch to bf16 Tensor Core variants; backward shrinks.
-- ``compiled``    - far fewer, longer (Triton-fused) kernels + cudaGraphLaunch.
+- ``starved``     - slow host dataloader leaves the GPU idle between steps
+                    (the single most common real-world bottleneck).
 """
 
 from __future__ import annotations
@@ -34,9 +35,11 @@ class Scenario:
     autocast_dtype: torch.dtype | None = None
     compile: bool = False
     compile_mode: str = "default"
-    # Advanced knobs (not used by default scenarios but available for
-    # experimentation via the CLI).
+    # Data-pipeline knobs. slow_host_data routes batches through CPU + H2D
+    # copy; slow_host_sleep_s adds an artificial delay before each copy to
+    # simulate a slow collate / dataloader worker.
     slow_host_data: bool = False
+    slow_host_sleep_s: float = 0.0
 
     def data_config(self) -> DataConfig:
         return DataConfig(
@@ -44,6 +47,7 @@ class Scenario:
             seq_len=self.model.seq_len,
             vocab_size=self.model.vocab_size,
             slow_host_data=self.slow_host_data,
+            slow_host_sleep_s=self.slow_host_sleep_s,
         )
 
 
@@ -78,13 +82,19 @@ SCENARIOS: dict[str, Scenario] = {
         batch_size=8,
         autocast_dtype=torch.bfloat16,
     ),
-    "compiled": Scenario(
-        name="compiled",
-        description="torch.compile(mode='reduce-overhead'), bs=8. Kernel fusion + CUDA graphs.",
+    "starved": Scenario(
+        name="starved",
+        description=(
+            "fp32, bs=8, with a slow CPU dataloader. GPU sits idle between "
+            "steps - the classic 'dataloader bottleneck' shape."
+        ),
         model=_BASELINE_MODEL,
         batch_size=8,
-        compile=True,
-        compile_mode="reduce-overhead",
+        slow_host_data=True,
+        # 20 ms is visibly larger than a baseline step (~19 ms on GH200),
+        # so the GPU-idle gaps are obvious in the timeline. Tunable via
+        # --slow-host-sleep-s on the CLI for playing with the ratio.
+        slow_host_sleep_s=0.020,
     ),
 }
 

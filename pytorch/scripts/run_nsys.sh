@@ -12,7 +12,7 @@
 
 set -euo pipefail
 
-SCENARIO="${1:?missing scenario name (e.g. baseline|large-batch|amp|compiled)}"
+SCENARIO="${1:?missing scenario name (e.g. baseline|large-batch|amp|starved)}"
 shift || true
 
 OUT_DIR="${OUT_DIR:-out}"
