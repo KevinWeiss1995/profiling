@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "profiling-demo"
+version = "0.1.0"
+description = "A focused PyTorch training-step profiling demo targeting GH200."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "profiling-demo" }]
+dependencies = [
+    # Install torch separately via the appropriate CUDA wheel index for your
+    # target platform; see README. Left unpinned here to keep this file
+    # portable across CUDA versions.
+    "torch>=2.3",
+    "numpy>=1.24",
+]
+
+[project.scripts]
+profiling-demo = "profiling_demo.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-dir]
+"" = "src"
